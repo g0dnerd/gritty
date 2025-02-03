@@ -2,6 +2,9 @@ use anyhow::Context;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+use crate::MatrixSize;
+
+/// Creates a simple handle on a GPU compute shader that can do matrix multiplication.
 pub struct GpuCompute {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -10,29 +13,29 @@ pub struct GpuCompute {
 
 impl GpuCompute {
     pub async fn new() -> anyhow::Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            backend_options: wgpu::BackendOptions::from_env_or_default(),
-        });
+        // Create a wgpu instance
+        let instance = wgpu::Instance::default();
 
+        // Request a handle to the physical graphics card
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
-            .context("Tried to request an adapter to the default GPU instance.")?;
+            .context("Tried to request an adapter handle to the GPU.")?;
 
+        // Request a connection to the physical device
         let (device, queue) = adapter
             .request_device(&Default::default(), None)
             .await
             .context("Tried to request device from default GPU instance adapter.")?;
 
+        // Include the .wgsl compute shader and parse it into a module on the GPU.
         let wgsl_shader = include_str!("shader.wgsl");
-
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Matrix Multiplication Shader"),
             source: wgpu::ShaderSource::Wgsl(wgsl_shader.into()),
         });
 
+        // Create a bind group layout with two read-only input buffers and one read/write output result buffer.
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Bind Group Layout"),
             entries: &[
@@ -66,6 +69,16 @@ impl GpuCompute {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -75,6 +88,7 @@ impl GpuCompute {
             push_constant_ranges: &[],
         });
 
+        // Create a pipeline containing the single shader stage.
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Compute Pipeline"),
             layout: Some(&pipeline_layout),
@@ -92,9 +106,16 @@ impl GpuCompute {
     }
 
     pub async fn run(&self, a: &[f32], b: &[f32], size: usize) -> Vec<f32> {
-        let buf_size = (size * size * std::mem::size_of::<f32>()) as u64;
+        let matrix_size = MatrixSize {
+            width_a: size as u32,
+            height_a: size as u32,
+            width_b: size as u32,
+        };
 
-        // Create GPU buffers
+        // Create matrix buffers
+        let buf_size =
+            (matrix_size.height_a * matrix_size.width_b * std::mem::size_of::<f32>() as u32) as u64;
+
         let matrix_a = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -109,7 +130,6 @@ impl GpuCompute {
                 contents: bytemuck::cast_slice(b),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             });
-
         let result_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Result Buffer"),
             size: buf_size,
@@ -117,7 +137,15 @@ impl GpuCompute {
             mapped_at_creation: false,
         });
 
-        // Create a bind group
+        let matrix_size_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Matrix Size Buffer"),
+                contents: bytemuck::cast_slice(&[matrix_size]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        // Create a bind group using the devices bind group layout.
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Bind Group"),
@@ -135,9 +163,14 @@ impl GpuCompute {
                     binding: 2,
                     resource: result_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: matrix_size_buf.as_entire_binding(),
+                },
             ],
         });
 
+        // Create a command encoder to encode operations for the GPU.
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -145,13 +178,14 @@ impl GpuCompute {
             });
 
         {
+            // Start a compute pass
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Compute Pass"),
                 timestamp_writes: None,
             });
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(size as u32 / 16, size as u32 / 16, 1);
+            compute_pass.dispatch_workgroups((size as u32 + 15) / 16, (size as u32 + 15) / 16, 1);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -172,10 +206,11 @@ impl GpuCompute {
         encoder.copy_buffer_to_buffer(&result_buf, 0, &result_staging_buf, 0, buf_size);
         self.queue.submit(Some(encoder.finish()));
 
-        // Wait for work to complete
         let buf_slice = result_staging_buf.slice(..);
+        // Get a handle on a new channel's sender and receiver
         let (tx, rx) = std::sync::mpsc::channel();
         buf_slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        // Wait for work to complete
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv().unwrap().unwrap();
 
