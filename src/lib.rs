@@ -136,19 +136,21 @@ mod tests {
 
     #[test]
     fn test_relu_fuzzy() {
-        block_on(async {
-            let mut rng = rng();
-            let gpu_compute = GpuCompute::new()
-                .await
-                .expect("Failed to obtain device handle on GPU.");
+        for _ in 0..20 {
+            block_on(async {
+                let mut rng = rng();
+                let gpu_compute = GpuCompute::new()
+                    .await
+                    .expect("Failed to obtain device handle on GPU.");
 
-            let size = rng.random_range(2..64);
-            let mut random_input = generate_random_tensor(size, &mut rng);
-            let expected_output = cpu_relu(&random_input, size);
+                let size = rng.random_range(2..64);
+                let mut random_input = generate_random_tensor(size, &mut rng);
+                let expected_output = cpu_relu(&random_input, size);
 
-            gpu_compute.relu(&mut random_input);
+                gpu_compute.relu(&mut random_input);
 
-            assert_eq!(random_input, expected_output);
-        })
+                assert_eq!(random_input, expected_output);
+            })
+        }
     }
 }
