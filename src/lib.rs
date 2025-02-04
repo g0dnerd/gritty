@@ -10,6 +10,7 @@ pub(crate) struct MatrixSize {
     width_b: u32,
 }
 
+#[derive(PartialEq)]
 pub(crate) enum PipelineType {
     Mul,
     Relu,
