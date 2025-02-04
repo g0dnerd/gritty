@@ -11,7 +11,7 @@ pub(crate) struct MatrixSize {
 }
 
 pub(crate) enum PipelineType {
-    Compute,
+    Mul,
     Relu,
 }
 
