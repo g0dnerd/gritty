@@ -1,3 +1,5 @@
+#![feature(test)]
+
 pub mod compute;
 
 #[repr(C)]
@@ -32,12 +34,10 @@ mod tests {
         result
     }
 
-    fn cpu_relu(input: &[f32], size: usize) -> Vec<f32> {
-        let mut output = vec![0.0; size];
-        for i in 0..size {
-            output[i] = input[i].max(0.0);
+    fn cpu_relu(input: &mut [f32], size: usize) {
+        for e in input.iter_mut().take(size) {
+            *e = e.max(0.0);
         }
-        output
     }
 
     // Helper function to generate a random 64x64 matrix
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_relu_fuzzy() {
+    fn test_relu_iter() {
         for _ in 0..20 {
             block_on(async {
                 let mut rng = rng();
@@ -145,12 +145,84 @@ mod tests {
 
                 let size = rng.random_range(2..64);
                 let mut random_input = generate_random_tensor(size, &mut rng);
-                let expected_output = cpu_relu(&random_input, size);
+                cpu_relu(&mut random_input, size);
+                let expected_output = random_input.clone();
 
                 gpu_compute.relu(&mut random_input);
 
                 assert_eq!(random_input, expected_output);
             })
+        }
+    }
+
+    mod bench {
+        extern crate test;
+
+        use pollster::block_on;
+        use rand::rng;
+        use test::Bencher;
+
+        use crate::{
+            compute::GpuCompute,
+            tests::{cpu_matrix_multiply, cpu_relu, generate_random_tensor},
+        };
+
+        #[bench]
+        fn bench_cpu_mul(b: &mut Bencher) {
+            const SIZE: usize = 64;
+            let mut matrix_a = Vec::with_capacity(SIZE * SIZE);
+            let mut identity_matrix = vec![0.0; SIZE * SIZE];
+
+            for (y, v) in identity_matrix.iter_mut().enumerate().take(SIZE * SIZE) {
+                matrix_a.push(y as f32);
+                if y % (SIZE + 1) == 0 {
+                    *v = 1.0;
+                }
+            }
+            b.iter(|| {
+                let _result = cpu_matrix_multiply(&matrix_a, &identity_matrix, SIZE);
+            });
+        }
+
+        #[bench]
+        fn bench_gpu_mul(b: &mut Bencher) {
+            const SIZE: usize = 64;
+            let mut matrix_a = Vec::with_capacity(SIZE * SIZE);
+            let mut identity_matrix = vec![0.0; SIZE * SIZE];
+
+            for (y, v) in identity_matrix.iter_mut().enumerate().take(SIZE * SIZE) {
+                matrix_a.push(y as f32);
+                if y % (SIZE + 1) == 0 {
+                    *v = 1.0;
+                }
+            }
+
+            let gpu_compute = block_on(GpuCompute::new()).unwrap();
+
+            b.iter(|| {
+                let _result = block_on(gpu_compute.matrix_mul(&matrix_a, &identity_matrix, SIZE));
+            });
+        }
+
+        #[bench]
+        fn bench_cpu_relu(b: &mut Bencher) {
+            const SIZE: usize = 64;
+            let mut rng = rng();
+
+            let mut random_input = generate_random_tensor(SIZE, &mut rng);
+
+            b.iter(|| cpu_relu(&mut random_input, SIZE));
+        }
+
+        #[bench]
+        fn bench_gpu_relu(b: &mut Bencher) {
+            const SIZE: usize = 64;
+            let mut rng = rng();
+
+            let mut random_input = generate_random_tensor(SIZE, &mut rng);
+            let gpu_compute = block_on(GpuCompute::new()).unwrap();
+
+            b.iter(|| gpu_compute.relu(&mut random_input));
         }
     }
 }
