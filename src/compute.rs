@@ -11,6 +11,9 @@ pub struct GpuCompute {
     mul_pipeline: ComputePipeline,
     relu_pipeline: ComputePipeline,
     staging_buf: wgpu::Buffer,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_group_type: Option<PipelineType>,
+    buf_size: u64,
 }
 
 impl GpuCompute {
@@ -26,7 +29,15 @@ impl GpuCompute {
 
         // Request a connection to the physical device
         let (device, queue) = adapter
-            .request_device(&Default::default(), None)
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: None,
+                    required_features: wgpu::Features::empty(),
+                    required_limits: adapter.limits(),
+                    memory_hints: wgpu::MemoryHints::MemoryUsage,
+                },
+                None,
+            )
             .await
             .context("Tried to request device from default GPU instance adapter.")?;
 
@@ -46,6 +57,9 @@ impl GpuCompute {
             mul_pipeline,
             relu_pipeline,
             staging_buf,
+            bind_group: None,
+            bind_group_type: None,
+            buf_size: 0,
         })
     }
 
@@ -89,29 +103,37 @@ impl GpuCompute {
             });
 
         // Create a bind group using the devices bind group layout.
-        let bind_group_layout = self.mul_pipeline.get_bind_group_layout(0);
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: matrix_a.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: matrix_b.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: result_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: matrix_size_buf.as_entire_binding(),
-                },
-            ],
-        });
+        if self
+            .bind_group_type
+            .as_ref()
+            .is_none_or(|t| t != &PipelineType::Mul)
+            || self.buf_size != buf_size
+        {
+            self.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bind Group"),
+                layout: &self.mul_pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: matrix_a.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: matrix_b.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: result_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: matrix_size_buf.as_entire_binding(),
+                    },
+                ],
+            }));
+            self.bind_group_type = Some(PipelineType::Mul);
+            self.buf_size = buf_size;
+        }
 
         // Create a command encoder to encode operations for the GPU.
         let mut encoder = self
@@ -127,15 +149,13 @@ impl GpuCompute {
                 timestamp_writes: None,
             });
             compute_pass.set_pipeline(&self.mul_pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             compute_pass.dispatch_workgroups(
-                (size as u32).div_ceil(16),
-                (size as u32).div_ceil(16),
+                (size as u32).div_ceil(32),
+                (size as u32).div_ceil(32),
                 1,
             );
         }
-
-        self.queue.submit(Some(encoder.finish()));
 
         // Read back the result
         if self.staging_buf.size() != buf_size {
@@ -147,11 +167,6 @@ impl GpuCompute {
             });
         }
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Result Copy Encoder"),
-            });
         encoder.copy_buffer_to_buffer(&result_buf, 0, &self.staging_buf, 0, buf_size);
         self.queue.submit(Some(encoder.finish()));
 
@@ -184,14 +199,23 @@ impl GpuCompute {
                     | wgpu::BufferUsages::COPY_SRC,
             });
 
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ReLU Bind Group"),
-            layout: &self.relu_pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buf.as_entire_binding(),
-            }],
-        });
+        if self
+            .bind_group_type
+            .as_ref()
+            .is_none_or(|t| t != &PipelineType::Relu)
+            || self.buf_size != buf_size
+        {
+            self.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ReLU Bind Group"),
+                layout: &self.relu_pipeline.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buf.as_entire_binding(),
+                }],
+            }));
+            self.bind_group_type = Some(PipelineType::Relu);
+            self.buf_size = buf_size;
+        }
 
         let mut encoder = self
             .device
@@ -205,8 +229,8 @@ impl GpuCompute {
                 timestamp_writes: None,
             });
             compute_pass.set_pipeline(&self.relu_pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups((input.len() as u32).div_ceil(512), 1, 1);
+            compute_pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+            compute_pass.dispatch_workgroups((input.len() as u32).div_ceil(65536), 1, 1);
         }
 
         if self.staging_buf.size() != buf_size {
