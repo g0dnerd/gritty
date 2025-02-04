@@ -54,7 +54,7 @@ mod tests {
     #[test]
     fn matrix_mul_1() {
         const SIZE: usize = 16;
-        let gpu_compute = block_on(GpuCompute::new()).unwrap();
+        let mut gpu_compute = block_on(GpuCompute::new()).unwrap();
         let matrix_a = vec![1.0; SIZE * SIZE];
         let matrix_b = matrix_a.clone();
         let result = block_on(gpu_compute.matrix_mul(&matrix_a, &matrix_b, SIZE));
@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn identity_matrix() {
         const SIZE: usize = 64;
-        let gpu_compute = block_on(GpuCompute::new()).unwrap();
+        let mut gpu_compute = block_on(GpuCompute::new()).unwrap();
         let mut matrix_a = Vec::new();
         let mut identity_matrix = vec![0.0; SIZE * SIZE];
 
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn identity_matrix_small() {
         const SIZE: usize = 4;
-        let gpu_compute = block_on(GpuCompute::new()).unwrap();
+        let mut gpu_compute = block_on(GpuCompute::new()).unwrap();
         let mut matrix_a = Vec::new();
         let mut identity_matrix = vec![0.0; SIZE * SIZE];
 
@@ -109,7 +109,7 @@ mod tests {
         let matrix_a = generate_random_matrix(size, &mut rng);
         let matrix_b = generate_random_matrix(size, &mut rng);
 
-        let gpu_compute = block_on(GpuCompute::new()).unwrap();
+        let mut gpu_compute = block_on(GpuCompute::new()).unwrap();
 
         let result = block_on(gpu_compute.matrix_mul(&matrix_a, &matrix_b, size));
         let cpu_result = cpu_matrix_multiply(&matrix_a, &matrix_b, size);
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn test_relu_simple() {
         block_on(async {
-            let gpu_compute = GpuCompute::new()
+            let mut gpu_compute = GpuCompute::new()
                 .await
                 .expect("Failed to obtain device handle on GPU.");
 
@@ -139,7 +139,7 @@ mod tests {
         for _ in 0..20 {
             block_on(async {
                 let mut rng = rng();
-                let gpu_compute = GpuCompute::new()
+                let mut gpu_compute = GpuCompute::new()
                     .await
                     .expect("Failed to obtain device handle on GPU.");
 
@@ -160,6 +160,7 @@ mod tests {
 
         use pollster::block_on;
         use rand::rng;
+        use std::hint::black_box;
         use test::Bencher;
 
         use crate::{
@@ -180,7 +181,11 @@ mod tests {
                 }
             }
             b.iter(|| {
-                let _result = cpu_matrix_multiply(&matrix_a, &identity_matrix, SIZE);
+                let _result = black_box(cpu_matrix_multiply(
+                    black_box(&matrix_a),
+                    black_box(&identity_matrix),
+                    black_box(SIZE),
+                ));
             });
         }
 
@@ -197,7 +202,7 @@ mod tests {
                 }
             }
 
-            let gpu_compute = block_on(GpuCompute::new()).unwrap();
+            let mut gpu_compute = block_on(GpuCompute::new()).unwrap();
 
             b.iter(|| {
                 let _result = block_on(gpu_compute.matrix_mul(&matrix_a, &identity_matrix, SIZE));
@@ -206,21 +211,28 @@ mod tests {
 
         #[bench]
         fn bench_cpu_relu(b: &mut Bencher) {
-            const SIZE: usize = 64;
+            const SIZE: usize = 1024;
             let mut rng = rng();
 
             let mut random_input = generate_random_tensor(SIZE, &mut rng);
 
-            b.iter(|| cpu_relu(&mut random_input, SIZE));
+            b.iter(|| {
+                cpu_relu(black_box(&mut random_input), black_box(SIZE));
+            });
         }
 
         #[bench]
         fn bench_gpu_relu(b: &mut Bencher) {
-            const SIZE: usize = 64;
+            const SIZE: usize = 1024;
             let mut rng = rng();
 
             let mut random_input = generate_random_tensor(SIZE, &mut rng);
-            let gpu_compute = block_on(GpuCompute::new()).unwrap();
+            let mut gpu_compute = block_on(GpuCompute::new()).unwrap();
+
+            for _ in 0..5 {
+                let mut warmup_input = generate_random_tensor(SIZE, &mut rng);
+                gpu_compute.relu(&mut warmup_input);
+            }
 
             b.iter(|| gpu_compute.relu(&mut random_input));
         }

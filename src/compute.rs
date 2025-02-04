@@ -10,6 +10,7 @@ pub struct GpuCompute {
     queue: Arc<wgpu::Queue>,
     mul_pipeline: ComputePipeline,
     relu_pipeline: ComputePipeline,
+    staging_buf: wgpu::Buffer,
 }
 
 impl GpuCompute {
@@ -32,15 +33,23 @@ impl GpuCompute {
         let mul_pipeline = Self::create_pipeline(&device, &PipelineType::Mul);
         let relu_pipeline = Self::create_pipeline(&device, &PipelineType::Relu);
 
+        let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Result Staging Buffer"),
+            size: 0,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
             mul_pipeline,
             relu_pipeline,
+            staging_buf,
         })
     }
 
-    pub async fn matrix_mul(&self, a: &[f32], b: &[f32], size: usize) -> Vec<f32> {
+    pub async fn matrix_mul(&mut self, a: &[f32], b: &[f32], size: usize) -> Vec<f32> {
         let matrix_size = MatrixSize {
             width_a: size as u32,
             height_a: size as u32,
@@ -48,6 +57,7 @@ impl GpuCompute {
         };
         let buf_size =
             (matrix_size.height_a * matrix_size.width_b * std::mem::size_of::<f32>() as u32) as u64;
+
         // Create matrix buffers
         let matrix_a = self
             .device
@@ -128,22 +138,24 @@ impl GpuCompute {
         self.queue.submit(Some(encoder.finish()));
 
         // Read back the result
-        let result_staging_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Result Staging Buffer"),
-            size: buf_size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        if self.staging_buf.size() != buf_size {
+            self.staging_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Result Staging Buffer"),
+                size: buf_size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Result Copy Encoder"),
             });
-        encoder.copy_buffer_to_buffer(&result_buf, 0, &result_staging_buf, 0, buf_size);
+        encoder.copy_buffer_to_buffer(&result_buf, 0, &self.staging_buf, 0, buf_size);
         self.queue.submit(Some(encoder.finish()));
 
-        let buf_slice = result_staging_buf.slice(..);
+        let buf_slice = self.staging_buf.slice(..);
         // Get a handle on a new channel's sender and receiver
         let (tx, rx) = std::sync::mpsc::channel();
         buf_slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
@@ -155,12 +167,12 @@ impl GpuCompute {
         let result = buf_slice.get_mapped_range();
         let output: Vec<f32> = bytemuck::cast_slice(&result).to_vec();
         drop(result);
-        result_staging_buf.unmap();
+        self.staging_buf.unmap();
 
         output
     }
 
-    pub fn relu(&self, input: &mut [f32]) {
+    pub fn relu(&mut self, input: &mut [f32]) {
         let buf_size = std::mem::size_of_val(input) as u64;
         let input_buf = self
             .device
@@ -194,27 +206,22 @@ impl GpuCompute {
             });
             compute_pass.set_pipeline(&self.relu_pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups((input.len() as u32).div_ceil(256), 1, 1);
+            compute_pass.dispatch_workgroups((input.len() as u32).div_ceil(512), 1, 1);
         }
 
-        self.queue.submit(Some(encoder.finish()));
-
-        let result_staging_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ReLU Result Staging Buffer"),
-            size: buf_size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Result Copy Encoder"),
+        if self.staging_buf.size() != buf_size {
+            self.staging_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Result Staging Buffer"),
+                size: buf_size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
-        encoder.copy_buffer_to_buffer(&input_buf, 0, &result_staging_buf, 0, buf_size);
+        }
+
+        encoder.copy_buffer_to_buffer(&input_buf, 0, &self.staging_buf, 0, buf_size);
         self.queue.submit(Some(encoder.finish()));
 
-        let buf_slice = result_staging_buf.slice(..);
+        let buf_slice = self.staging_buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         buf_slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
         self.device.poll(wgpu::Maintain::Wait);
@@ -223,7 +230,7 @@ impl GpuCompute {
         let result = buf_slice.get_mapped_range();
         input.copy_from_slice(bytemuck::cast_slice(&result));
         drop(result);
-        result_staging_buf.unmap();
+        self.staging_buf.unmap();
     }
 
     fn create_pipeline(device: &wgpu::Device, layout: &PipelineType) -> ComputePipeline {
