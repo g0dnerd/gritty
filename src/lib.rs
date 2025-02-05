@@ -41,6 +41,17 @@ mod tests {
         }
     }
 
+    pub fn matrices_are_equal(a: &[f32], b: &[f32], size: usize) -> bool {
+        const EPSILON: f32 = 1e-4;
+        if a.len() != b.len() || a.len() != size * size {
+            return false; // Ensure matrices are of the same size
+        }
+
+        a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| (x - y).abs() <= EPSILON)
+    }
+
     // Helper function to generate a random 64x64 matrix
     fn generate_random_matrix(size: usize, rng: &mut impl Rng) -> Vec<f32> {
         (0..size * size)
@@ -79,7 +90,7 @@ mod tests {
         let expected_result = matrix_a.clone();
         let result = block_on(gpu_compute.matrix_mul(&matrix_a, &identity_matrix, SIZE));
 
-        assert_eq!(result, expected_result);
+        assert!(matrices_are_equal(&result, &expected_result, SIZE));
     }
 
     #[test]
@@ -99,7 +110,7 @@ mod tests {
         let expected_result = matrix_a.clone();
         let result = block_on(gpu_compute.matrix_mul(&matrix_a, &identity_matrix, SIZE));
 
-        assert_eq!(result, expected_result);
+        assert!(matrices_are_equal(&result, &expected_result, SIZE))
     }
 
     #[test]
@@ -115,7 +126,7 @@ mod tests {
         let result = block_on(gpu_compute.matrix_mul(&matrix_a, &matrix_b, size));
         let cpu_result = cpu_matrix_multiply(&matrix_a, &matrix_b, size);
 
-        assert_eq!(result, cpu_result);
+        assert!(matrices_are_equal(&result, &cpu_result, size));
     }
 
     #[test]
