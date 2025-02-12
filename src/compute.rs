@@ -27,6 +27,8 @@ impl GpuCompute {
             .await
             .context("Tried to request an adapter handle to the GPU.")?;
 
+        println!("Adapter limits: {:?}", adapter.limits());
+
         // Request a connection to the physical device
         let (device, queue) = adapter
             .request_device(
